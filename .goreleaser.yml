@@ -115,6 +115,7 @@ brews:
   - repository:
       owner: certwatch-app
       name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     directory: Formula
     homepage: "https://certwatch.app"
     description: "SSL/TLS certificate monitoring agent for CertWatch"
