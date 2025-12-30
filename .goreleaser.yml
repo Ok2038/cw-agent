@@ -115,7 +115,7 @@ brews:
   - repository:
       owner: certwatch-app
       name: homebrew-tap
-    folder: Formula
+    directory: Formula
     homepage: "https://certwatch.app"
     description: "SSL/TLS certificate monitoring agent for CertWatch"
     license: "Apache-2.0"
