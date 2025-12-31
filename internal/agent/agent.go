@@ -5,15 +5,19 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
 	"github.com/certwatch-app/cw-agent/internal/config"
+	"github.com/certwatch-app/cw-agent/internal/metrics"
 	"github.com/certwatch-app/cw-agent/internal/scanner"
+	"github.com/certwatch-app/cw-agent/internal/server"
 	"github.com/certwatch-app/cw-agent/internal/state"
 	"github.com/certwatch-app/cw-agent/internal/sync"
+	"github.com/certwatch-app/cw-agent/internal/version"
 )
 
 // Agent orchestrates certificate scanning and syncing
@@ -23,6 +27,7 @@ type Agent struct {
 	client       *sync.Client
 	stateManager *state.Manager
 	logger       *zap.Logger
+	server       *server.Server
 	lastScan     []scanner.ScanResult
 }
 
@@ -40,12 +45,19 @@ func New(cfg *config.Config, stateManager *state.Manager) (*Agent, error) {
 	// Create sync client with state manager
 	client := sync.New(cfg, logger, stateManager)
 
+	// Create metrics/health server if enabled
+	var srv *server.Server
+	if cfg.Agent.MetricsPort > 0 {
+		srv = server.New(cfg.Agent.MetricsPort, logger)
+	}
+
 	return &Agent{
 		config:       cfg,
 		scanner:      s,
 		client:       client,
 		stateManager: stateManager,
 		logger:       logger,
+		server:       srv,
 	}, nil
 }
 
@@ -58,11 +70,36 @@ func (a *Agent) Run(ctx context.Context) error {
 		zap.Duration("scan_interval", a.config.Agent.ScanInterval),
 	)
 
+	// Set initial metrics
+	metrics.SetCertificatesConfigured(len(a.config.Certificates))
+
+	// Start metrics/health server if enabled
+	if a.server != nil {
+		a.server.Start()
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := a.server.Shutdown(shutdownCtx); err != nil {
+				a.logger.Error("failed to shutdown metrics server", zap.Error(err))
+			}
+		}()
+	}
+
 	// Perform initial scan and sync
 	if err := a.scanAndSync(ctx); err != nil {
 		a.logger.Error("initial sync failed", zap.Error(err))
 		// Continue running even if initial sync fails
 	}
+
+	// Mark agent as ready after initial sync
+	server.SetReady(true)
+
+	// Set agent info metric (after first sync we have agent_id)
+	agentID := a.stateManager.GetAgentID()
+	if agentID == "" {
+		agentID = "unknown"
+	}
+	metrics.SetAgentInfo(version.GetVersion(), a.config.Agent.Name, agentID)
 
 	// Setup tickers
 	syncTicker := time.NewTicker(a.config.Agent.SyncInterval)
@@ -70,10 +107,24 @@ func (a *Agent) Run(ctx context.Context) error {
 	defer syncTicker.Stop()
 	defer scanTicker.Stop()
 
+	// Setup heartbeat ticker if enabled
+	var heartbeatTicker *time.Ticker
+	var heartbeatChan <-chan time.Time
+	if a.config.Agent.HeartbeatInterval > 0 {
+		heartbeatTicker = time.NewTicker(a.config.Agent.HeartbeatInterval)
+		heartbeatChan = heartbeatTicker.C
+		defer heartbeatTicker.Stop()
+		a.logger.Info("heartbeat enabled", zap.Duration("interval", a.config.Agent.HeartbeatInterval))
+	}
+
+	// Start uptime counter
+	go a.trackUptime(ctx)
+
 	for {
 		select {
 		case <-ctx.Done():
 			a.logger.Info("agent stopping")
+			server.SetReady(false)
 			return ctx.Err()
 
 		case <-scanTicker.C:
@@ -86,6 +137,12 @@ func (a *Agent) Run(ctx context.Context) error {
 			a.logger.Debug("sync interval triggered")
 			if err := a.syncWithCloud(ctx); err != nil {
 				a.logger.Error("sync failed", zap.Error(err))
+			}
+
+		case <-heartbeatChan:
+			a.logger.Debug("heartbeat interval triggered")
+			if err := a.sendHeartbeat(ctx); err != nil {
+				a.logger.Error("heartbeat failed", zap.Error(err))
 			}
 		}
 	}
@@ -114,16 +171,46 @@ func (a *Agent) scan(ctx context.Context) error {
 	results := a.scanner.ScanAll(ctx, a.config.Certificates)
 	a.lastScan = results
 
-	// Count successes and failures
+	// Count successes and failures, update metrics
 	successCount := 0
 	failCount := 0
+	scanDuration := time.Since(start).Seconds() / float64(len(a.config.Certificates))
+
 	for _, r := range results {
+		portStr := strconv.Itoa(r.Port)
+
 		if r.Success {
 			successCount++
+			metrics.RecordScanSuccess(r.Hostname, scanDuration)
+
+			// Update certificate metrics
+			if r.Certificate != nil {
+				daysUntilExpiry := float64(r.Certificate.DaysUntilExpiry)
+				expiryTimestamp := float64(r.Certificate.NotAfter.Unix())
+
+				// Determine validity: certificate is valid if it hasn't expired
+				valid := r.Certificate.DaysUntilExpiry >= 0
+
+				// Determine chain validity
+				chainValid := r.Chain != nil && r.Chain.Valid
+
+				metrics.RecordCertificateMetrics(
+					r.Hostname,
+					portStr,
+					daysUntilExpiry,
+					expiryTimestamp,
+					valid,
+					chainValid,
+				)
+			}
 		} else {
 			failCount++
+			metrics.RecordScanFailure(r.Hostname, scanDuration)
 		}
 	}
+
+	// Record scan time for health checks
+	server.RecordScan()
 
 	a.logger.Info("scan complete",
 		zap.Duration("duration", time.Since(start)),
@@ -147,9 +234,16 @@ func (a *Agent) syncWithCloud(ctx context.Context) error {
 	a.logger.Info("syncing with cloud")
 
 	resp, err := a.client.Sync(ctx, a.config.Certificates, a.lastScan)
+	duration := time.Since(start).Seconds()
+
 	if err != nil {
+		metrics.RecordSyncFailure(duration)
 		return err
 	}
+
+	// Record successful sync metrics
+	metrics.RecordSyncSuccess(duration, resp.Data.Created, resp.Data.Updated, resp.Data.Orphaned)
+	server.RecordSync()
 
 	a.logger.Info("sync complete",
 		zap.Duration("duration", time.Since(start)),
@@ -172,6 +266,42 @@ func (a *Agent) syncWithCloud(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// sendHeartbeat sends a heartbeat to the CertWatch API
+func (a *Agent) sendHeartbeat(ctx context.Context) error {
+	start := time.Now()
+
+	// Get last scan and sync times for heartbeat status
+	lastScan, _ := server.GetLastScan()
+	lastSync, _ := server.GetLastSync()
+
+	err := a.client.Heartbeat(ctx, len(a.config.Certificates), lastScan, lastSync)
+	duration := time.Since(start).Seconds()
+
+	if err != nil {
+		metrics.RecordHeartbeatFailure(duration)
+		return err
+	}
+
+	metrics.RecordHeartbeatSuccess(duration)
+	a.logger.Debug("heartbeat sent successfully")
+	return nil
+}
+
+// trackUptime increments the uptime counter every second
+func (a *Agent) trackUptime(ctx context.Context) {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			metrics.AgentUptime.Inc()
+		}
+	}
 }
 
 // setupLogger creates a configured zap logger

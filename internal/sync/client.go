@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -18,21 +19,23 @@ import (
 
 // Client handles communication with the CertWatch API
 type Client struct {
-	endpoint     string
-	apiKey       string
-	httpClient   *http.Client
-	logger       *zap.Logger
-	agentName    string
-	stateManager *state.Manager
+	endpoint          string
+	apiKey            string
+	httpClient        *http.Client
+	logger            *zap.Logger
+	agentName         string
+	stateManager      *state.Manager
+	heartbeatInterval time.Duration
 }
 
 // New creates a new sync Client with state manager for agent ID persistence
 func New(cfg *config.Config, logger *zap.Logger, stateManager *state.Manager) *Client {
 	return &Client{
-		endpoint:     cfg.API.Endpoint,
-		apiKey:       cfg.API.Key,
-		agentName:    cfg.Agent.Name,
-		stateManager: stateManager,
+		endpoint:          cfg.API.Endpoint,
+		apiKey:            cfg.API.Key,
+		agentName:         cfg.Agent.Name,
+		stateManager:      stateManager,
+		heartbeatInterval: cfg.Agent.HeartbeatInterval,
 		httpClient: &http.Client{
 			Timeout: cfg.API.Timeout,
 		},
@@ -68,6 +71,76 @@ func (c *Client) Sync(ctx context.Context, certs []config.CertificateConfig, res
 	}
 
 	return resp, nil
+}
+
+// Heartbeat sends a heartbeat to the CertWatch API
+func (c *Client) Heartbeat(ctx context.Context, certCount int, lastScan, lastSync time.Time) error {
+	agentID := c.stateManager.GetAgentID()
+	if agentID == "" {
+		// No agent ID yet, skip heartbeat until first sync
+		return nil
+	}
+
+	req := &HeartbeatRequest{
+		AgentID:          agentID,
+		AgentName:        c.agentName,
+		AgentVersion:     version.GetVersion(),
+		CertificateCount: certCount,
+		Status:           "healthy",
+	}
+
+	// Add last scan time if available
+	if !lastScan.IsZero() {
+		req.LastScanAt = &lastScan
+	}
+
+	// Add last sync time if available
+	if !lastSync.IsZero() {
+		req.LastSyncAt = &lastSync
+	}
+
+	_, err := c.doHeartbeatRequest(ctx, req)
+	return err
+}
+
+func (c *Client) doHeartbeatRequest(ctx context.Context, body *HeartbeatRequest) (*HeartbeatResponse, error) {
+	url := c.endpoint + "/api/v1/agent/heartbeat"
+
+	jsonData, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal heartbeat request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonData))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create heartbeat request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", c.apiKey)
+	req.Header.Set("User-Agent", fmt.Sprintf("cw-agent/%s", version.GetVersion()))
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("heartbeat request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read heartbeat response: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("heartbeat API returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var heartbeatResp HeartbeatResponse
+	if err := json.Unmarshal(respBody, &heartbeatResp); err != nil {
+		return nil, fmt.Errorf("failed to parse heartbeat response: %w", err)
+	}
+
+	return &heartbeatResp, nil
 }
 
 func (c *Client) buildSyncRequest(certs []config.CertificateConfig, results []scanner.ScanResult) *SyncRequest {
@@ -125,13 +198,20 @@ func (c *Client) buildSyncRequest(certs []config.CertificateConfig, results []sc
 
 	hostname := getHostname()
 
+	// Calculate heartbeat interval in seconds (0 if disabled)
+	heartbeatSeconds := 0
+	if c.heartbeatInterval > 0 {
+		heartbeatSeconds = int(c.heartbeatInterval.Seconds())
+	}
+
 	return &SyncRequest{
-		AgentID:         c.stateManager.GetAgentID(),
-		PreviousAgentID: c.stateManager.GetPreviousAgentID(),
-		AgentName:       c.agentName,
-		AgentVersion:    version.GetVersion(),
-		AgentHost:       hostname,
-		Certificates:    certData,
+		AgentID:                  c.stateManager.GetAgentID(),
+		PreviousAgentID:          c.stateManager.GetPreviousAgentID(),
+		AgentName:                c.agentName,
+		AgentVersion:             version.GetVersion(),
+		AgentHost:                hostname,
+		HeartbeatIntervalSeconds: heartbeatSeconds,
+		Certificates:             certData,
 	}
 }
 

@@ -7,12 +7,13 @@ import (
 
 // SyncRequest represents the agent sync request payload
 type SyncRequest struct {
-	AgentID         string                `json:"agent_id,omitempty"`
-	PreviousAgentID string                `json:"previous_agent_id,omitempty"` // For migration when agent name changes
-	AgentName       string                `json:"agent_name"`
-	AgentVersion    string                `json:"agent_version,omitempty"`
-	AgentHost       string                `json:"agent_hostname,omitempty"`
-	Certificates    []CertificateSyncData `json:"certificates"`
+	AgentID                  string                `json:"agent_id,omitempty"`
+	PreviousAgentID          string                `json:"previous_agent_id,omitempty"` // For migration when agent name changes
+	AgentName                string                `json:"agent_name"`
+	AgentVersion             string                `json:"agent_version,omitempty"`
+	AgentHost                string                `json:"agent_hostname,omitempty"`
+	HeartbeatIntervalSeconds int                   `json:"heartbeat_interval_seconds,omitempty"` // Heartbeat interval for offline detection
+	Certificates             []CertificateSyncData `json:"certificates"`
 }
 
 // CertificateSyncData represents certificate data sent to the API
@@ -74,4 +75,22 @@ type SyncError struct {
 type APIError struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+}
+
+// HeartbeatRequest represents the agent heartbeat request payload
+type HeartbeatRequest struct {
+	AgentID          string     `json:"agent_id"`
+	AgentName        string     `json:"agent_name"`
+	AgentVersion     string     `json:"agent_version,omitempty"`
+	CertificateCount int        `json:"certificate_count,omitempty"`
+	Status           string     `json:"status,omitempty"` // "healthy", "degraded", "unhealthy"
+	LastScanAt       *time.Time `json:"last_scan_at,omitempty"`
+	LastSyncAt       *time.Time `json:"last_sync_at,omitempty"`
+}
+
+// HeartbeatResponse represents the API response from heartbeat
+type HeartbeatResponse struct {
+	Success    bool      `json:"success"`
+	AgentID    string    `json:"agent_id"`
+	ServerTime time.Time `json:"server_time"`
 }

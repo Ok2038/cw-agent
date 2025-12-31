@@ -27,11 +27,13 @@ type APIConfig struct {
 // AgentConfig contains agent behavior settings
 // Fields are ordered for optimal memory alignment
 type AgentConfig struct {
-	Name         string        `mapstructure:"name"`
-	LogLevel     string        `mapstructure:"log_level"`
-	SyncInterval time.Duration `mapstructure:"sync_interval"`
-	ScanInterval time.Duration `mapstructure:"scan_interval"`
-	Concurrency  int           `mapstructure:"concurrency"`
+	Name              string        `mapstructure:"name"`
+	LogLevel          string        `mapstructure:"log_level"`
+	SyncInterval      time.Duration `mapstructure:"sync_interval"`
+	ScanInterval      time.Duration `mapstructure:"scan_interval"`
+	HeartbeatInterval time.Duration `mapstructure:"heartbeat_interval"`
+	Concurrency       int           `mapstructure:"concurrency"`
+	MetricsPort       int           `mapstructure:"metrics_port"`
 }
 
 // CertificateConfig represents a certificate to monitor
@@ -73,8 +75,10 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("agent.name", "default-agent")
 	v.SetDefault("agent.sync_interval", "5m")
 	v.SetDefault("agent.scan_interval", "1m")
+	v.SetDefault("agent.heartbeat_interval", "30s")
 	v.SetDefault("agent.concurrency", 10)
 	v.SetDefault("agent.log_level", "info")
+	v.SetDefault("agent.metrics_port", 8080)
 }
 
 // Validate validates the configuration
@@ -152,6 +156,16 @@ func (c *Config) validateAgent() error {
 	}
 	if !validLogLevels[c.Agent.LogLevel] {
 		return fmt.Errorf("log_level must be one of: debug, info, warn, error")
+	}
+
+	// HeartbeatInterval of 0 means disabled, otherwise must be at least 10s
+	if c.Agent.HeartbeatInterval != 0 && c.Agent.HeartbeatInterval < 10*time.Second {
+		return fmt.Errorf("heartbeat_interval must be at least 10 seconds (or 0 to disable)")
+	}
+
+	// MetricsPort of 0 means disabled, otherwise must be valid port
+	if c.Agent.MetricsPort != 0 && (c.Agent.MetricsPort < 1 || c.Agent.MetricsPort > 65535) {
+		return fmt.Errorf("metrics_port must be between 1 and 65535 (or 0 to disable)")
 	}
 
 	return nil
