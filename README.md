@@ -13,6 +13,9 @@ SSL/TLS certificate monitoring agent for [CertWatch](https://certwatch.app). Mon
 - **Config-driven monitoring** - Define certificates to monitor in a YAML file
 - **Automatic scanning** - Continuously scan certificates at configurable intervals
 - **Cloud sync** - Automatically sync certificate data to CertWatch dashboard
+- **Prometheus metrics** - Expose certificate and agent metrics at `/metrics`
+- **Health endpoints** - Kubernetes-ready `/healthz`, `/readyz`, `/livez` endpoints
+- **Heartbeat support** - Agent offline detection and alerting
 - **Agent state persistence** - Agent ID survives restarts, supports name changes
 - **Smart certificate migration** - Certificates transfer when resetting agents
 - **Chain validation** - Detect chain issues, expiration, and weak cryptography
@@ -72,6 +75,8 @@ agent:
   name: "production-monitor"
   sync_interval: 5m
   scan_interval: 1m
+  metrics_port: 8080      # Prometheus metrics (0 to disable)
+  heartbeat_interval: 30s # Agent offline alerts (0 to disable)
 
 certificates:
   - hostname: "www.example.com"
@@ -194,6 +199,8 @@ Using `--reset-agent`:
 | `agent.scan_interval` | How often to scan certificates | `1m` |
 | `agent.concurrency` | Max concurrent scans | `10` |
 | `agent.log_level` | Log level (debug/info/warn/error) | `info` |
+| `agent.metrics_port` | Port for Prometheus metrics and health endpoints (0 to disable) | `8080` |
+| `agent.heartbeat_interval` | How often to send heartbeats for offline alerts (0 to disable) | `30s` |
 
 ### Certificate Settings
 
@@ -264,6 +271,58 @@ services:
       - ./certwatch.yaml:/etc/certwatch/certwatch.yaml:ro
 ```
 
+## Observability
+
+### Prometheus Metrics
+
+When `metrics_port` is set (default: `8080`), the agent exposes Prometheus metrics at `http://localhost:8080/metrics`:
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `certwatch_certificate_days_until_expiry` | Gauge | Days until certificate expires |
+| `certwatch_certificate_valid` | Gauge | Certificate validity (1=valid, 0=invalid) |
+| `certwatch_certificate_chain_valid` | Gauge | Chain validity (1=valid, 0=invalid) |
+| `certwatch_certificate_expiry_timestamp_seconds` | Gauge | Expiry as Unix timestamp |
+| `certwatch_scan_total` | Counter | Total scans by status (success/failure) |
+| `certwatch_scan_duration_seconds` | Histogram | Scan duration |
+| `certwatch_sync_total` | Counter | Total syncs by status |
+| `certwatch_sync_duration_seconds` | Histogram | Sync duration |
+| `certwatch_heartbeat_total` | Counter | Total heartbeats by status |
+| `certwatch_agent_info` | Gauge | Agent info (version, name, agent_id) |
+| `certwatch_agent_certificates_configured` | Gauge | Number of configured certificates |
+
+### Health Endpoints
+
+The agent exposes Kubernetes-compatible health endpoints:
+
+| Endpoint | Description |
+|----------|-------------|
+| `/healthz` | Basic liveness check - returns OK if server is running |
+| `/readyz` | Readiness probe - returns 503 during initialization |
+| `/livez` | Deep liveness - returns 503 if no scans in last 10 minutes |
+
+Example Kubernetes probe configuration:
+
+```yaml
+livenessProbe:
+  httpGet:
+    path: /livez
+    port: 8080
+  initialDelaySeconds: 30
+  periodSeconds: 10
+
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: 8080
+  initialDelaySeconds: 5
+  periodSeconds: 5
+```
+
+### Heartbeat & Offline Alerts
+
+When `heartbeat_interval` is set (default: `30s`), the agent sends periodic heartbeats to CertWatch. If heartbeats stop, the dashboard can alert you that an agent is offline.
+
 ## Getting an API Key
 
 1. Log in to [CertWatch](https://certwatch.app)
@@ -299,7 +358,9 @@ cw-agent/
 │   ├── cmd/            # CLI commands
 │   │   └── initcmd/    # Init wizard forms & logic
 │   ├── config/         # Configuration loading
+│   ├── metrics/        # Prometheus metrics definitions
 │   ├── scanner/        # TLS certificate scanning
+│   ├── server/         # HTTP server (metrics & health endpoints)
 │   ├── state/          # Agent state persistence
 │   ├── sync/           # API client
 │   ├── ui/             # Shared CLI styling
@@ -312,7 +373,15 @@ cw-agent/
 
 ## Changelog
 
-### v0.2.1 (Current)
+### v0.3.0 (Current)
+
+- **Prometheus metrics** - Expose certificate, scan, sync, and agent metrics at `/metrics`
+- **Health endpoints** - Kubernetes-ready `/healthz`, `/readyz`, `/livez` endpoints
+- **Heartbeat support** - Configurable heartbeat interval for agent offline detection
+- **Init wizard updates** - New "Observability" step for metrics port and heartbeat interval
+- **Bug fixes** - Fixed Docker image tag, updated install script URL
+
+### v0.2.1
 
 - **Agent state persistence** - Agent ID stored in `.certwatch-state.json`
 - **Name change detection** - Warns when `agent.name` changes in config
