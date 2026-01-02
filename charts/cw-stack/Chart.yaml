@@ -6,11 +6,11 @@ description: |
 
 type: application
 
-# Chart version - synced with app version 
-version: 0.5.0
+# Chart version - synced with app version
+version: 0.5.1
 
 # Application version - matches the bundled agent versions
-appVersion: "0.5.0"
+appVersion: "0.5.1"
 
 home: https://certwatch.app
 sources:

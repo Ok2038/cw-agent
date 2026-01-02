@@ -53,7 +53,8 @@ apiKey:
 # ============================================================
 agent:
   # Unique name for this agent (required)
-  name: ""
+  # Override this with a meaningful name for your deployment
+  name: "cw-agent"
   # Log level: debug, info, warn, error
   logLevel: "info"
   # How often to sync with CertWatch cloud
